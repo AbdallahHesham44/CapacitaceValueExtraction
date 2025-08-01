@@ -10,14 +10,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 class CapacitorValueMatcher:
-    def __init__(self, input_file_path, output_dir="output", batch_size=10000, num_threads=4, checkpoint_interval=5000):
+    def __init__(self, input_file_path, output_dir="output", batch_size=10000, num_threads=4, checkpoint_interval=5000, progress_callback=None):
         self.input_file_path = input_file_path
         self.output_dir = output_dir
         self.batch_size = batch_size
         self.num_threads = num_threads
         self.checkpoint_interval = checkpoint_interval
-        ##############################
         self.progress_callback = progress_callback
+
         os.makedirs(output_dir, exist_ok=True)
 
         self.checkpoint_file = os.path.join(output_dir, "checkpoint.json")
@@ -121,7 +121,7 @@ class CapacitorValueMatcher:
             'pf': 1,
             'nf': 1000,
             'uf': 1000000,
-            '\u00b5f': 1000000,
+            'µf': 1000000,
             'mf': 1000000000,
             'f': 1000000000000
         }
@@ -135,142 +135,5 @@ class CapacitorValueMatcher:
         if not numeric_match:
             return 0, 'pf'
         numeric_value = float(numeric_match.group())
-        unit_match = re.search(r'[a-zA-Z\u00b5]+', value_str)
-        unit = unit_match.group().lower() if unit_match else 'pf'
-        return numeric_value, unit
-
-    def generate_unit_variants(self, pf_value):
-        variants = [(pf_value, 'pf')]
-        if pf_value != 0:
-            uf_value = pf_value / 1000000
-            variants.append((uf_value, 'uf'))
-        return variants
-
-    def debug_single_row(self, part_number, value_str):
-        patterns = self.extract_patterns(part_number)
-        all_calculated_values = []
-        for pattern in patterns:
-            all_calculated_values.extend(self.calculate_values(pattern))
-        target_numeric, target_unit = self.parse_value_column(value_str)
-        target_pf = self.convert_to_pf(target_numeric, target_unit)
-        for calc_value in all_calculated_values:
-            for variant_value, variant_unit in self.generate_unit_variants(calc_value):
-                variant_pf = self.convert_to_pf(variant_value, variant_unit)
-                if abs(variant_pf - target_pf) < max(1e-6, target_pf * 1e-10):
-                    return True
-        return False
-
-    def process_single_row(self, row_data):
-        row_index, row = row_data
-        part_number = str(row.get('PartNumber', ''))
-        target_value_str = row.get('Value', '')
-        patterns = self.extract_patterns(part_number)
-        if not patterns:
-            result_row = row.copy()
-            result_row['ExValue'] = 'No patterns found'
-            result_row['Status'] = 'no_match'
-            return ('unmatched', result_row)
-        all_calculated_values = []
-        for pattern in patterns:
-            all_calculated_values.extend(self.calculate_values(pattern))
-        if not all_calculated_values:
-            result_row = row.copy()
-            result_row['ExValue'] = 'No values calculated'
-            result_row['Status'] = 'no_match'
-            return ('unmatched', result_row)
-        target_numeric, target_unit = self.parse_value_column(target_value_str)
-        target_pf = self.convert_to_pf(target_numeric, target_unit)
-        for calc_value in all_calculated_values:
-            for variant_value, variant_unit in self.generate_unit_variants(calc_value):
-                variant_pf = self.convert_to_pf(variant_value, variant_unit)
-                if abs(variant_pf - target_pf) < max(1e-6, target_pf * 1e-10):
-                    result_row = row.copy()
-                    result_row['ExValue'] = f"{variant_value} {variant_unit}"
-                    result_row['Status'] = 'match'
-                    return ('matched', result_row)
-        result_row = row.copy()
-        result_row['ExValue'] = f"Calc:{[f'{v:.6g}' for v in all_calculated_values[:5]]} vs Target:{target_pf:.6g}pF"
-        result_row['Status'] = 'no_match'
-        return ('unmatched', result_row)
-
-    def process_batch(self, batch_df):
-        batch_matched = []
-        batch_unmatched = []
-        row_data = [(idx, row) for idx, row in batch_df.iterrows()]
-        with ThreadPoolExecutor(max_workers=self.num_threads) as executor:
-            futures = {executor.submit(self.process_single_row, rd): rd for rd in row_data}
-            for future in as_completed(futures):
-                try:
-                    result_type, result_row = future.result()
-                    if result_type == 'matched':
-                        batch_matched.append(result_row)
-                    else:
-                        batch_unmatched.append(result_row)
-                except Exception as e:
-                    batch_unmatched.append({'Error': str(e), 'ExValue': 'Error', 'Status': 'error'})
-        return batch_matched, batch_unmatched
-
-    def combine_batch_files(self):
-        matched_files = [f for f in os.listdir(self.output_dir) if f.startswith('matched_batch_')]
-        if matched_files:
-            matched_dfs = [pd.read_excel(os.path.join(self.output_dir, f)) for f in matched_files]
-            final_matched = pd.concat(matched_dfs, ignore_index=True)
-            final_matched.to_excel(os.path.join(self.output_dir, "MatchedOutput.xlsx"), index=False)
-            for f in matched_files:
-                os.remove(os.path.join(self.output_dir, f))
-
-        unmatched_files = [f for f in os.listdir(self.output_dir) if f.startswith('unmatched_batch_')]
-        if unmatched_files:
-            unmatched_dfs = [pd.read_excel(os.path.join(self.output_dir, f)) for f in unmatched_files]
-            final_unmatched = pd.concat(unmatched_dfs, ignore_index=True)
-            final_unmatched.to_excel(os.path.join(self.output_dir, "notMatchedOutput.xlsx"), index=False)
-            for f in unmatched_files:
-                os.remove(os.path.join(self.output_dir, f))
-
-   def process_file(self):
-       
-        self.load_checkpoint()
-        df = pd.read_excel(self.input_file_path)
-    
-        total_rows = len(df)
-        if self.processed_rows > 0:
-            df = df.iloc[self.processed_rows:].reset_index(drop=True)
-    
-        batch_num = self.processed_rows // self.batch_size
-    
-        for start in range(0, len(df), self.batch_size):
-            end = min(start + self.batch_size, len(df))
-            batch_df = df.iloc[start:end].copy()
-    
-            batch_matched, batch_unmatched = self.process_batch(batch_df)
-    
-            # Save results
-            if batch_matched:
-                pd.DataFrame(batch_matched).to_excel(
-                    os.path.join(self.output_dir, f"matched_batch_{batch_num}.xlsx"), index=False)
-            if batch_unmatched:
-                pd.DataFrame(batch_unmatched).to_excel(
-                    os.path.join(self.output_dir, f"unmatched_batch_{batch_num}.xlsx"), index=False)
-    
-            # Update internal state
-            with self.lock:
-                self.processed_rows += len(batch_df)
-                self.matched_results.extend(batch_matched)
-                self.unmatched_results.extend(batch_unmatched)
-    
-            # Save checkpoint
-            if (self.processed_rows) % self.checkpoint_interval == 0:
-                self.save_checkpoint()
-    
-            # ✅ Call progress callback after each batch
-            if self.progress_callback:
-                self.progress_callback(self.processed_rows, total_rows, batch_num + 1)
-    
-            batch_num += 1
-    
-        # Finalize
-        self.combine_batch_files()
-    
-        for temp_file in [self.checkpoint_file, self.matched_temp_file, self.unmatched_temp_file]:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
+        unit_match = re.search(r'[a-zA-Zµ]+', value_str)
+        unit = unit_match_
