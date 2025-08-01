@@ -16,7 +16,8 @@ class CapacitorValueMatcher:
         self.batch_size = batch_size
         self.num_threads = num_threads
         self.checkpoint_interval = checkpoint_interval
-
+        ##############################
+        self.progress_callback = progress_callback
         os.makedirs(output_dir, exist_ok=True)
 
         self.checkpoint_file = os.path.join(output_dir, "checkpoint.json")
@@ -226,28 +227,49 @@ class CapacitorValueMatcher:
             for f in unmatched_files:
                 os.remove(os.path.join(self.output_dir, f))
 
-    def process_file(self):
-        self.load_checkpoint()
-        df = pd.read_excel(self.input_file_path)
-        if self.processed_rows > 0:
-            df = df.iloc[self.processed_rows:].reset_index(drop=True)
-        batch_num = self.processed_rows // self.batch_size
-        for start in range(0, len(df), self.batch_size):
-            end = min(start + self.batch_size, len(df))
-            batch_df = df.iloc[start:end].copy()
-            batch_matched, batch_unmatched = self.process_batch(batch_df)
-            if batch_matched:
-                pd.DataFrame(batch_matched).to_excel(os.path.join(self.output_dir, f"matched_batch_{batch_num}.xlsx"), index=False)
-            if batch_unmatched:
-                pd.DataFrame(batch_unmatched).to_excel(os.path.join(self.output_dir, f"unmatched_batch_{batch_num}.xlsx"), index=False)
-            with self.lock:
-                self.processed_rows += len(batch_df)
-                self.matched_results.extend(batch_matched)
-                self.unmatched_results.extend(batch_unmatched)
-            if (self.processed_rows) % self.checkpoint_interval == 0:
-                self.save_checkpoint()
-            batch_num += 1
-        self.combine_batch_files()
-        for temp_file in [self.checkpoint_file, self.matched_temp_file, self.unmatched_temp_file]:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
+   def process_file(self):
+            self.load_checkpoint()
+            df = pd.read_excel(self.input_file_path)
+        
+            total_rows = len(df)
+            if self.processed_rows > 0:
+                df = df.iloc[self.processed_rows:].reset_index(drop=True)
+        
+            batch_num = self.processed_rows // self.batch_size
+        
+            for start in range(0, len(df), self.batch_size):
+                end = min(start + self.batch_size, len(df))
+                batch_df = df.iloc[start:end].copy()
+        
+                batch_matched, batch_unmatched = self.process_batch(batch_df)
+        
+                # Save results
+                if batch_matched:
+                    pd.DataFrame(batch_matched).to_excel(
+                        os.path.join(self.output_dir, f"matched_batch_{batch_num}.xlsx"), index=False)
+                if batch_unmatched:
+                    pd.DataFrame(batch_unmatched).to_excel(
+                        os.path.join(self.output_dir, f"unmatched_batch_{batch_num}.xlsx"), index=False)
+        
+                # Update internal state
+                with self.lock:
+                    self.processed_rows += len(batch_df)
+                    self.matched_results.extend(batch_matched)
+                    self.unmatched_results.extend(batch_unmatched)
+        
+                # Save checkpoint
+                if (self.processed_rows) % self.checkpoint_interval == 0:
+                    self.save_checkpoint()
+        
+                # ✅ Call progress callback after each batch
+                if self.progress_callback:
+                    self.progress_callback(self.processed_rows, total_rows, batch_num + 1)
+        
+                batch_num += 1
+        
+            # Finalize
+            self.combine_batch_files()
+        
+            for temp_file in [self.checkpoint_file, self.matched_temp_file, self.unmatched_temp_file]:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
